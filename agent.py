@@ -5,6 +5,7 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.types import interrupt
+from langsmith import traceable
 
 from config import get_llm
 from mcp_client import current_weather, forecast, list_airlines, list_airports, tavily_search
@@ -16,12 +17,17 @@ for _stream in (sys.stdout, sys.stderr):
 
 llm = get_llm()
 
-def _llm_text(system: str, prompt: str) -> str:
+def _llm_text(system: str, prompt: str, *, agent_name: str, call_name: str) -> str:
     response = llm.invoke(
         [
             SystemMessage(content=system),
             HumanMessage(content=prompt),
-        ]
+        ],
+        config={
+            "run_name": f"{agent_name}:{call_name}",
+            "tags": [agent_name, call_name, "llm-call"],
+            "metadata": {"agent": agent_name, "call": call_name},
+        },
     )
     return response.content
 
@@ -43,6 +49,7 @@ def _json_from_llm(text: str) -> dict:
 
 
 # with guardrail
+@traceable(run_type="chain", name="supervisor_agent", tags=["agent:supervisor"])
 def supervisor_agent(state: TravelState):
     query = state["user_query"]
             
@@ -64,6 +71,8 @@ def supervisor_agent(state: TravelState):
     guardrail_raw = _llm_text(
         "You are an input validation guardrail. Return strict JSON only.",
         guardrail_prompt,
+        agent_name="supervisor",
+        call_name="guardrail",
     )
 
     print("\n========== GUARDRAIL RAW RESPONSE ==========")
@@ -130,6 +139,8 @@ User request:
     raw = _llm_text(
         "You route work to specialist agents. Return strict JSON only.",
         prompt,
+        agent_name="supervisor",
+        call_name="routing",
     )
 
     print("\n========== RAW LLM RESPONSE ==========")
@@ -239,6 +250,7 @@ User request:
 
 
 
+@traceable(run_type="chain", name="flight_agent", tags=["agent:flight"])
 def flight_agent(state: TravelState):
     query = state["user_query"]
     constraints = state["trip_constraints"]
@@ -283,6 +295,8 @@ and booking advice.
     result = _llm_text(
         "You are a flight planning specialist.",
         prompt,
+        agent_name="flight_agent",
+        call_name="flight_plan",
     )
 
     print("\n========== FLIGHT AGENT OUTPUT ==========")
@@ -298,6 +312,7 @@ and booking advice.
 
 
 
+@traceable(run_type="chain", name="hotel_agent", tags=["agent:hotel"])
 def hotel_agent(state: TravelState):
     query = f"Best hotels and areas to stay for: {state['user_query']}"
 
@@ -317,6 +332,7 @@ def hotel_agent(state: TravelState):
     }
 
 
+@traceable(run_type="chain", name="weather_agent", tags=["agent:weather"])
 def weather_agent(state: TravelState):
     constraints = state["trip_constraints"]
     city = constraints["destination"]
@@ -355,6 +371,7 @@ Forecast:
 
 
 
+@traceable(run_type="chain", name="budget_agent", tags=["agent:budget"])
 def budget_agent(state: TravelState):
 
     print("\n========== BUDGET AGENT INPUT ==========")
@@ -396,6 +413,8 @@ Return a concise budget assessment with:
     result = _llm_text(
         "You are a practical travel budget analyst.",
         prompt,
+        agent_name="budget_agent",
+        call_name="budget_assessment",
     )
 
     print("\n========== BUDGET AGENT OUTPUT ==========")
@@ -410,6 +429,7 @@ Return a concise budget assessment with:
 
 
 
+@traceable(run_type="chain", name="itinerary_agent", tags=["agent:itinerary"])
 def itinerary_agent(state: TravelState):
 
     print("\n========== ITINERARY AGENT INPUT ==========")
@@ -456,6 +476,8 @@ Make the output structured, practical, and ready for human review.
     result = _llm_text(
         "You are an expert itinerary planner.",
         prompt,
+        agent_name="itinerary_agent",
+        call_name="draft_itinerary",
     )
 
     print("\n========== ITINERARY OUTPUT ==========")
@@ -478,6 +500,7 @@ Reply with approval or feedback.
     }
 
 
+@traceable(run_type="chain", name="human_approval_agent", tags=["agent:human_approval", "human-in-the-loop"])
 def human_approval_agent(state: TravelState):
     feedback = interrupt(
         {
@@ -502,6 +525,7 @@ def human_approval_agent(state: TravelState):
 
 
 
+@traceable(run_type="chain", name="final_response_agent", tags=["agent:final_response"])
 def final_response_agent(state: TravelState):
 
     print("\n========== FINAL AGENT INPUT ==========")
@@ -541,6 +565,8 @@ Budget notes:
     result = _llm_text(
         "You produce final user-ready travel plans.",
         prompt,
+        agent_name="final_response_agent",
+        call_name="final_response",
     )
 
     print("\n========== FINAL RESPONSE ==========")

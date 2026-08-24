@@ -1,6 +1,7 @@
 import os
 
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from langsmith import traceable
 
 from config import (
     AVIATION_STACK_API_KEY,
@@ -92,21 +93,26 @@ async def call_tool(tool_name: str, args: dict = None):
 
 
 
+@traceable(run_type="tool", name="mcp_tavily_search", tags=["mcp"])
 async def tavily_search(query: str):
     return await call_tool("tavily_search", {"query": query})
 
 
+@traceable(run_type="tool", name="mcp_list_airports", tags=["mcp"])
 async def list_airports(search: str = "", limit: int = 10):
     return await call_tool("list_airports", {"search": search, "limit": limit, "offset": 0})
 
 
+@traceable(run_type="tool", name="mcp_list_airlines", tags=["mcp"])
 async def list_airlines(search: str = "", limit: int = 10):
     return await call_tool("list_airlines", {"search": search, "limit": limit, "offset": 0})
 
 
+@traceable(run_type="tool", name="mcp_current_weather", tags=["mcp"])
 async def current_weather(city: str):
     return await call_tool("get_current_weather", {"city": city})
 
 
+@traceable(run_type="tool", name="mcp_forecast", tags=["mcp"])
 async def forecast(city: str):
     return await call_tool("get_forecast", {"city": city})

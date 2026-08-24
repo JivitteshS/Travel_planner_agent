@@ -30,7 +30,12 @@ query = st.text_area(
     height=110,
 )
 
-config = {"configurable": {"thread_id": st.session_state.thread_id}}
+config = {
+    "configurable": {"thread_id": st.session_state.thread_id},
+    "run_name": "travel_planner_run",
+    "tags": ["streamlit"],
+    "metadata": {"user_id": user_id, "thread_id": st.session_state.thread_id},
+}
 
 
 if st.button("Create Draft Plan", type="primary"):
@@ -101,7 +106,7 @@ if st.session_state.get("waiting_for_approval"):
                         "feedback": feedback,
                     }
                 ),
-                config=config,
+                config={**config, "run_name": "travel_planner_resume"},
             )
         st.session_state.latest_result = final_result
         st.session_state.waiting_for_approval = False

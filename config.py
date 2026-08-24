@@ -2,7 +2,6 @@ import os
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 from langchain_openai import AzureChatOpenAI
-from langchain_mcp_adapters.client import MultiServerMCPClient
 
 load_dotenv()
 
@@ -16,6 +15,38 @@ AZURE_OPENAI_DEPLOYMENT_NAME = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME")
 AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
 AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION")
 
+# ------------------------
+# LangSmith observability
+# ------------------------
+# Accepts either the LANGSMITH_* or the legacy LANGCHAIN_* env var names.
+# Tracing is only switched on when an API key is actually present, so a
+# machine without LangSmith configured just runs untraced instead of erroring.
+LANGSMITH_API_KEY = os.getenv("LANGSMITH_API_KEY") or os.getenv("LANGCHAIN_API_KEY")
+LANGSMITH_PROJECT = (
+    os.getenv("LANGSMITH_PROJECT")
+    or os.getenv("LANGCHAIN_PROJECT")
+    or "travel-planner-agent"
+)
+LANGSMITH_ENDPOINT = os.getenv("LANGSMITH_ENDPOINT") or os.getenv("LANGCHAIN_ENDPOINT")
+LANGSMITH_TRACING_ENABLED = bool(LANGSMITH_API_KEY) and os.getenv(
+    "LANGSMITH_TRACING", os.getenv("LANGCHAIN_TRACING_V2", "true")
+).lower() not in ("false", "0", "")
+
+if LANGSMITH_TRACING_ENABLED:
+    os.environ["LANGCHAIN_TRACING_V2"] = "true"
+    os.environ["LANGSMITH_TRACING"] = "true"
+    os.environ["LANGCHAIN_API_KEY"] = LANGSMITH_API_KEY
+    os.environ["LANGSMITH_API_KEY"] = LANGSMITH_API_KEY
+    os.environ["LANGCHAIN_PROJECT"] = LANGSMITH_PROJECT
+    os.environ["LANGSMITH_PROJECT"] = LANGSMITH_PROJECT
+    if LANGSMITH_ENDPOINT:
+        os.environ["LANGCHAIN_ENDPOINT"] = LANGSMITH_ENDPOINT
+        os.environ["LANGSMITH_ENDPOINT"] = LANGSMITH_ENDPOINT
+else:
+    os.environ["LANGCHAIN_TRACING_V2"] = "false"
+    os.environ["LANGSMITH_TRACING"] = "false"
+
+
 def get_llm():
     return ChatGroq(model=os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"))
 
@@ -26,108 +57,3 @@ def get_llm():
 #         api_key=AZURE_OPENAI_API_KEY,
 #         api_version=AZURE_OPENAI_API_VERSION,
 #     )
-
-
-
-# Create MCP Client
-client = MultiServerMCPClient(
-    {
-        "tavily": {
-            "transport": "streamable_http",
-            "url": f"https://mcp.tavily.com/mcp/?tavilyApiKey={TAVILY_API_KEY}"
-        },
-
-        "aviationstack": {
-            "transport": "stdio",
-            "command": r"E:\Travelplanneragent\aviationstack-mcp\.venv\Scripts\python.exe",
-            "args": [
-                "-m",
-                "aviationstack_mcp",
-                "mcp",
-                "run"
-            ],
-            "env": {
-                "AVIATION_STACK_API_KEY": AVIATION_STACK_API_KEY
-            }
-        }   ,
-        "weather": {
-            "transport": "stdio",
-            "command": r"E:\Travelplanneragent\multi_agent\Scripts\python.exe",
-            "args": [
-                r"E:\Travelplanneragent\weather_mcp_server.py"
-            ],
-            "env": {
-                "OPENWEATHER_API_KEY": OPENWEATHER_API_KEY
-            }
-        }
-
-
-    }
-)
-
-
-# Cache tools so we don't load them repeatedly
-_tools_cache = None
-
-
-async def get_tools():
-    global _tools_cache
-
-    if _tools_cache is None:
-        try:
-            _tools_cache = await client.get_tools()
-
-        except Exception as e:
-            print("\n========== FULL ERROR ==========")
-            print(type(e))
-            print(repr(e))
-
-            if hasattr(e, "exceptions"):
-                print("\nSUB EXCEPTIONS:")
-                for i, sub in enumerate(e.exceptions):
-                    print(f"\n--- Exception {i+1} ---")
-                    print(type(sub))
-                    print(repr(sub))
-
-            raise
-
-    return _tools_cache
-
-async def call_tool(tool_name: str, args: dict = None):
-    tools = await get_tools()
-
-    tool = next(
-        (tool for tool in tools if tool.name == tool_name),
-        None,
-    )
-
-    if tool is None:
-        raise ValueError(f"Tool '{tool_name}' not found")
-
-    return await tool.ainvoke(args or {})
-
-
-# ------------------------
-# Tavily MCP Tools
-# ------------------------
-
-
-
-async def tavily_search(query: str):
-    return await call_tool("tavily_search", {"query": query})
-
-
-async def list_airports(search: str = "", limit: int = 10):
-    return await call_tool("list_airports", {"search": search, "limit": limit, "offset": 0})
-
-
-async def list_airlines(search: str = "", limit: int = 10):
-    return await call_tool("list_airlines", {"search": search, "limit": limit, "offset": 0})
-
-
-async def current_weather(city: str):
-    return await call_tool("get_current_weather", {"city": city})
-
-
-async def forecast(city: str):
-    return await call_tool("get_forecast", {"city": city})
