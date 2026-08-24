@@ -1,46 +1,35 @@
 # Real-World Multi-Agent Travel Planner
 
 A LangGraph-based multi-agent system that plans a trip end to end: it interprets a
-free-text travel request, fans work out to specialist agents (flights, hotels,
+free-text travel request, associates work to agents (flights, hotels,
 weather, budget), drafts an itinerary, pauses for human approval, and then produces
-a final polished plan. Agents get live data through MCP (Model Context Protocol)
-servers rather than hallucinating it.
+a final plan. Agents get live data through MCP (Model Context Protocol)
+servers.
 
-For the list of bugs found and fixed to get this running, see [CHANGES.md](CHANGES.md).
+
+---
+
+![Architecture flow](architecture-diagram.png)
 
 ---
 
 ## 1. How the agent works
 
-A single user request flows through a **LangGraph state graph** (`graph.py`) built
-around one shared state object (`TravelState`) that every node reads from and writes
-back into.
-
 1. The user submits a free-text request (e.g. *"Plan a 5-day trip to Tokyo under
-   $2500 for two people, include weather info"*) via the Streamlit UI (`frontend.py`)
-   or directly via `graph.app.invoke(...)`.
-2. **`supervisor_agent`** runs an input guardrail (rejects non-travel requests),
+   $2500 for two people, include weather info"*)
+2. **supervisor_agent** runs an input guardrail (rejects requests which are not related to travel planning.),
    then asks the LLM to extract structured `trip_constraints` (destination, origin,
-   duration, budget, etc.) and decide which specialist agents are actually needed
-   for this request.
-3. The graph **dynamically routes** to only the selected specialist agents, in a
-   fixed order (flight → hotel → weather → budget), skipping any that weren't
-   selected.
-4. Every specialist agent that ran writes its findings into the shared state.
+   duration, budget, etc.) and decide which agents are actually needed to perform these tasks.
+3. The graph **dynamically routes** to the selected specialist agents, in a
+   fixed order (flight → hotel → weather → budget), skipping the agents which were not selected.
+4. Every agent writes its output to the shared state.
    **`itinerary_agent`** always runs last and synthesizes everything (flight,
    hotel, weather, budget results) into a draft itinerary.
-5. The graph **pauses** at `human_approval_agent` via LangGraph's `interrupt()` —
+5. The graph **pauses** at `human_approval_agent`
    execution stops and the draft itinerary is returned to the caller for review.
-   This is what makes the Postgres checkpointer necessary (see §4): the paused
-   state has to be persisted somewhere so the graph can resume later, potentially
-   in a different process.
-6. The user approves or requests changes. The caller resumes the graph with
-   `Command(resume={"approved": ..., "feedback": ...})`.
+6. The user approves or requests changes. The caller resumes the graph with.
 7. **`final_response_agent`** produces the polished final plan (incorporating
    feedback if the draft was rejected) and the graph ends.
-
-Each specialist agent call increments `llm_calls` in the state, and every node
-appends an `AIMessage` to `state["messages"]` so the run has a readable trace.
 
 ---
 
@@ -56,22 +45,17 @@ All agents live in [agent.py](agent.py) and are wired into the graph in [graph.p
 | **`weather_agent`** | Fetches current weather and a forecast for the destination city from the local Weather MCP server (OpenWeather-backed) and returns them as-is. |
 | **`budget_agent`** | Given the flight, hotel, and weather results so far, asks the LLM for a feasibility/cost assessment: cost categories, risk areas, money-saving suggestions, and whether the plan fits the stated budget. |
 | **`itinerary_agent`** | Synthesizes every specialist agent's output (whichever ran) into a structured, day-by-day draft itinerary, and prepares the approval request shown to the human. Always runs, even if no specialist agents were selected. |
-| **`human_approval_agent`** | Pauses the graph with `interrupt()`, surfacing the draft itinerary and waiting for a human decision (`approved: bool`, optional `feedback`). Nothing downstream runs until the graph is resumed. |
+| **`human_approval_agent`** | Pauses the graph with , surfacing the draft itinerary and waiting for a human decision (`approved: bool`, optional `feedback`). Nothing downstream runs until the graph is resumed. |
 | **`final_response_agent`** | Produces the final, user-facing travel plan — either polishing the approved draft, or revising it based on the human's rejection feedback. |
 
 ---
 
 ## 3. MCP servers used
 
-The agents never call third-party APIs directly — all live data comes through MCP
-servers wired up via `langchain_mcp_adapters.MultiServerMCPClient` in
-[mcp_client.py](mcp_client.py):
-
-| Server | Transport | Backing API | Used by |
-|---|---|---|---|
-| **`tavily`** | `streamable_http` (remote, `mcp.tavily.com`) | Tavily web search | `hotel_agent` (`tavily_search`) |
-| **`aviationstack`** | `stdio` (local subprocess) | [AviationStack](https://aviationstack.com/) flight/airport/airline data | `flight_agent` (`list_airports`, `list_airlines`) |
-| **`weather`** | `stdio` (local subprocess, [weather_mcp_server.py](weather_mcp_server.py)) | OpenWeather current conditions + forecast | `weather_agent` (`current_weather`, `forecast`) |
+**Why each one is used:**
+- **Tavily** — a web search tool. It's used so the hotel agent can search the live web for real hotel and neighborhood recommendations instead of the LLM guessing from memory.
+- **AviationStack** — a flight/airport data lookup service. It's used so the flight agent can pull real airport and airline information for the destination instead of making it up.
+- **Weather (OpenWeather)** — a weather data service. It's used so the weather agent can tell the traveler what the actual current conditions and forecast look like at their destination.
 
 The `aviationstack` server is a vendored copy of the third-party
 [Pradumnasaraf/aviationstack-mcp](https://github.com/Pradumnasaraf/aviationstack-mcp)
@@ -79,33 +63,6 @@ project, included in this repo as a **git submodule** (`aviationstack-mcp/`) wit
 its own `uv`-managed virtual environment. The `weather` server is a small custom
 FastMCP server written for this project (`get_current_weather` / `get_forecast`
 tools over the OpenWeather API).
-
-`mcp_client.py` also exposes a `call_tool()` helper that looks up a tool by name
-from whichever MCP server exposes it, so agent code never has to know which
-server a given tool lives on.
-
----
-
-## 4. Database used
-
-**PostgreSQL**, used exclusively as a **LangGraph checkpointer** (`graph.py`, via
-`langgraph.checkpoint.postgres.PostgresSaver`) — not as an application database.
-
-Its job is to persist the graph's state at every step, keyed by `thread_id`. This
-is what makes the human-in-the-loop pause in step 5 above actually work: when
-`human_approval_agent` calls `interrupt()`, LangGraph needs somewhere durable to
-save "the graph is paused here, with this state" so that a later, unrelated
-request (`Command(resume=...)`) can pick the same thread back up — including
-across process restarts, since the state isn't just kept in memory.
-
-If `DATABASE_URL` isn't set, `graph.py` falls back to an in-memory-only compiled
-graph (no persistence across restarts, and human-in-the-loop resume only works
-within the same process run).
-
-Connection string: `DATABASE_URL` in `.env`, e.g.
-`postgresql://postgres:postgres@localhost:5432/langgraph_memory`. The
-`langgraph_memory` database must exist beforehand — `PostgresSaver.setup()` only
-creates the checkpoint tables inside it, not the database itself.
 
 ---
 
@@ -123,48 +80,6 @@ draft `itinerary`, the human approval fields (`approval_request`,
 **Nodes:** `supervisor`, `flight_agent`, `hotel_agent`, `weather_agent`,
 `budget_agent`, `itinerary_agent`, `human_approval`, `final_response` — each
 backed by the corresponding function in `agent.py`.
-
-**Routing logic:**
-- `START → supervisor` unconditionally.
-- `supervisor → {selected agent}` via `route_from_supervisor`: picks the *first*
-  specialist agent from a fixed priority order
-  (`flight → hotel → weather → budget`) that the supervisor selected; if none
-  were selected, it skips straight to `itinerary_agent`.
-- After each specialist agent runs, `route_after_agent(current_agent)` looks
-  further down that same priority order for the *next* selected agent to run
-  next; once there are none left, it routes to `itinerary_agent`. This is how
-  the graph "fans out" to only the agents that are actually relevant to the
-  request instead of always running all four.
-- `itinerary_agent → human_approval` (always).
-- `human_approval → final_response` (always, whether approved or not — the
-  branching on approval happens *inside* `final_response_agent`, not as a graph
-  edge).
-- `final_response → END`.
-
-```
-START
-  └─▶ supervisor ──▶ [flight_agent] ──▶ [hotel_agent] ──▶ [weather_agent] ──▶ [budget_agent]
-                          (each step only runs if the supervisor selected it)
-                                                 │
-                                                 ▼
-                                          itinerary_agent
-                                                 │
-                                                 ▼
-                                            human_approval  ⟸ interrupt() waits here
-                                                 │
-                                    (resumed via Command(resume=...))
-                                                 ▼
-                                          final_response
-                                                 │
-                                                 ▼
-                                                END
-```
-
-**Persistence:** if `DATABASE_URL` is configured, the compiled graph is given a
-`PostgresSaver` checkpointer (see §4), so the pause/resume cycle survives across
-separate `invoke()` calls (and processes).
-
----
 
 ## 6. Running it
 
