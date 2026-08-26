@@ -6,6 +6,7 @@ from typing import Any
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.types import interrupt
 from langsmith import traceable
+from langsmith.run_helpers import get_current_run_tree
 
 from config import get_llm
 from mcp_client import current_weather, forecast, list_airlines, list_airports, tavily_search
@@ -85,11 +86,17 @@ def supervisor_agent(state: TravelState):
     print(json.dumps(guardrail_result, indent=2))
     print("================================================\n")
 
+    run = get_current_run_tree()
+
     if not guardrail_result.get("allowed", False):
         reason = guardrail_result.get(
             "reason",
             "Request rejected by input guardrail."
         )
+
+        if run:
+            run.add_metadata({"guardrail_allowed": False, "guardrail_reason": reason})
+            run.add_outputs({"supervisor_output": reason})
 
         return {
             "selected_agents": [],
@@ -172,7 +179,17 @@ User request:
     Yes, you can get output from a string, but it's much harder and less reliable.
     '''
     
-    selected = parsed["selected_agents"]    
+    selected = parsed["selected_agents"]
+
+    if run:
+        run.add_metadata({"guardrail_allowed": True, "selected_agents": selected})
+        run.add_outputs(
+            {
+                "selected_agents": selected,
+                "trip_constraints": parsed["trip_constraints"],
+                "supervisor_reasoning": parsed["reasoning"],
+            }
+        )
 
     return {
         "selected_agents": selected,
@@ -272,6 +289,15 @@ def flight_agent(state: TravelState):
     print(airlines)
     print("======================================\n")
 
+    run = get_current_run_tree()
+    if run:
+        run.add_metadata(
+            {
+                "mcp_airports_data": airports,
+                "mcp_airlines_data": airlines,
+            }
+        )
+
     prompt = f"""
 Create flight guidance for this trip.
 
@@ -303,6 +329,9 @@ and booking advice.
     print(result)
     print("=========================================\n")
 
+    if run:
+        run.add_outputs({"flight_agent_output": result})
+
     return {
         "flight_results": result,
         "messages": [AIMessage(content="Flight agent completed.")],
@@ -325,6 +354,11 @@ def hotel_agent(state: TravelState):
     print("\n========== HOTEL SEARCH RESULT ==========")
     print(result)
     print("=========================================\n")
+
+    run = get_current_run_tree()
+    if run:
+        run.add_metadata({"mcp_tavily_data": result})
+        run.add_outputs({"hotel_agent_output": str(result)})
 
     return {
         "hotel_results": str(result),
@@ -352,6 +386,15 @@ def weather_agent(state: TravelState):
     print(forecast_data)
     print("======================================\n")
 
+    run = get_current_run_tree()
+    if run:
+        run.add_metadata(
+            {
+                "mcp_current_weather_data": weather_data,
+                "mcp_forecast_data": forecast_data,
+            }
+        )
+
     result = f"""
 Current weather:
 {weather_data}
@@ -363,6 +406,9 @@ Forecast:
     print("\n========== WEATHER AGENT OUTPUT ==========")
     print(result)
     print("==========================================\n")
+
+    if run:
+        run.add_outputs({"weather_agent_output": result})
 
     return {
         "weather_results": result,
@@ -420,6 +466,10 @@ Return a concise budget assessment with:
     print("\n========== BUDGET AGENT OUTPUT ==========")
     print(result)
     print("=========================================\n")
+
+    run = get_current_run_tree()
+    if run:
+        run.add_outputs({"budget_agent_output": result})
 
     return {
         "budget_results": result,
@@ -492,6 +542,10 @@ Please review this draft travel plan.
 Reply with approval or feedback.
 """
 
+    run = get_current_run_tree()
+    if run:
+        run.add_outputs({"itinerary_agent_output": result})
+
     return {
         "itinerary": result,
         "approval_request": approval_request,
@@ -516,6 +570,10 @@ def human_approval_agent(state: TravelState):
 
     approved = feedback["approved"]
     human_feedback = feedback["feedback"]
+
+    run = get_current_run_tree()
+    if run:
+        run.add_metadata({"approved": approved, "human_feedback": human_feedback})
 
     return {
         "approved": approved,
@@ -572,6 +630,10 @@ Budget notes:
     print("\n========== FINAL RESPONSE ==========")
     print(result)
     print("====================================\n")
+
+    run = get_current_run_tree()
+    if run:
+        run.add_outputs({"final_response_output": result})
 
     return {
         "final_response": result,

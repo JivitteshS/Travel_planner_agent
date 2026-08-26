@@ -48,12 +48,12 @@ else:
 
 
 def get_llm():
-    return ChatGroq(model=os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"))
+    return AzureChatOpenAI(
+        azure_endpoint=AZURE_OPENAI_ENDPOINT,
+        azure_deployment=AZURE_OPENAI_DEPLOYMENT_NAME,
+        api_key=AZURE_OPENAI_API_KEY,
+        api_version=AZURE_OPENAI_API_VERSION,
+    )
 
 # def get_llm():
-#     return AzureChatOpenAI(
-#         azure_endpoint=AZURE_OPENAI_ENDPOINT,
-#         azure_deployment=AZURE_OPENAI_DEPLOYMENT_NAME,
-#         api_key=AZURE_OPENAI_API_KEY,
-#         api_version=AZURE_OPENAI_API_VERSION,
-#     )
+#     return ChatGroq(model=os.getenv("GROQ_MODEL", "qwen/qwen3.6-27b"))
